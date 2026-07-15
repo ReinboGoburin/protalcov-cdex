@@ -1,38 +1,54 @@
-import { fetchJson, json, missingKey, tmdbImage, unavailable, yearFromDate } from "@/lib/api";
-import type { SearchResponse } from "@/lib/types";
+import { NextRequest, NextResponse } from "next/server"
+import { serviceUnavailable } from "@/lib/server/errors"
+import { getServerEnv } from "@/lib/server/env"
+import { TMDB_TV_GENRES } from "@/lib/server/tmdbGenres"
+import type { SearchResponse, SearchResult } from "@/lib/types"
 
-interface TmdbTvSearch {
-  page: number;
-  total_pages: number;
-  results: Array<{ id: number; name: string; first_air_date?: string; poster_path?: string | null }>;
-}
+export async function GET(req: NextRequest) {
+  const query = req.nextUrl.searchParams.get("q")?.trim()
+  const page = Number(req.nextUrl.searchParams.get("page") ?? "1") || 1
 
-export async function GET(request: Request) {
-  const token = process.env.TMDB_BEARER_TOKEN;
-  if (!token) return missingKey("TMDB_BEARER_TOKEN");
-  const { searchParams } = new URL(request.url);
-  const query = searchParams.get("q")?.trim();
-  const page = searchParams.get("page") || "1";
-  if (!query) return json({ results: [], hasMore: false } satisfies SearchResponse);
+  if (!query) {
+    return NextResponse.json<SearchResponse>({ results: [], hasMore: false })
+  }
+
+  const token = getServerEnv().TMDB_BEARER_TOKEN
+  if (!token) return serviceUnavailable()
 
   try {
-    const data = await fetchJson<TmdbTvSearch>(
-      `https://api.themoviedb.org/3/search/tv?query=${encodeURIComponent(query)}&language=fr-FR&page=${page}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    return json({
-      results: data.results.slice(0, 10).map((item) => ({
-        id: String(item.id),
+    const url = new URL("https://api.themoviedb.org/3/search/tv")
+    url.searchParams.set("query", query)
+    url.searchParams.set("language", "fr-FR")
+    url.searchParams.set("page", String(page))
+
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!res.ok) return serviceUnavailable()
+
+    const data = (await res.json()) as any
+    const rawResults: Array<Record<string, unknown>> = data.results ?? []
+
+    const results: SearchResult[] = rawResults.slice(0, 10).map((show) => {
+      const genreIds = (show.genre_ids as number[] | undefined) ?? []
+      const genreNames = genreIds.map((id) => TMDB_TV_GENRES[id]).filter(Boolean)
+      const posterPath = show.poster_path as string | null
+      return {
+        id: String(show.id),
         type: "tv",
-        title: item.name,
-        subtitle: "Serie",
-        year: yearFromDate(item.first_air_date),
-        imageUrl: tmdbImage(item.poster_path, "w185"),
-        source: "tmdb"
-      })),
-      hasMore: data.page < data.total_pages
-    } satisfies SearchResponse);
+        title: String(show.name ?? ""),
+        subtitle: genreNames.slice(0, 2).join(", "),
+        year: String(show.first_air_date ?? "").slice(0, 4),
+        imageUrl: posterPath ? `https://image.tmdb.org/t/p/w185${posterPath}` : null,
+        source: "tmdb",
+      }
+    })
+
+    const totalPages = Number(data.total_pages ?? 1)
+    const hasMore = rawResults.length > 10 || page < totalPages
+
+    return NextResponse.json<SearchResponse>({ results, hasMore })
   } catch {
-    return unavailable();
+    return serviceUnavailable()
   }
 }

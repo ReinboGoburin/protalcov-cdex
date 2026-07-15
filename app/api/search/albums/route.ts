@@ -1,41 +1,61 @@
-import { fetchJson, json, unavailable, USER_AGENT, yearFromDate } from "@/lib/api";
-import type { SearchResponse } from "@/lib/types";
+import { NextRequest, NextResponse } from "next/server"
+import { musicbrainzFetch } from "@/lib/server/musicbrainz"
+import { serviceUnavailable } from "@/lib/server/errors"
+import type { SearchResponse, SearchResult } from "@/lib/types"
 
-interface MusicBrainzSearch {
-  count: number;
-  "release-groups": Array<{
-    id: string;
-    title: string;
-    "first-release-date"?: string;
-    "primary-type"?: string;
-    "artist-credit"?: Array<{ name: string }>;
-  }>;
+interface ReleaseGroup {
+  id: string
+  title: string
+  "primary-type"?: string
+  "first-release-date"?: string
+  "artist-credit"?: Array<{ name: string }>
 }
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const query = searchParams.get("q")?.trim();
-  if (!query) return json({ results: [], hasMore: false } satisfies SearchResponse);
+export async function GET(req: NextRequest) {
+  const query = req.nextUrl.searchParams.get("q")?.trim()
+  const page = Number(req.nextUrl.searchParams.get("page") ?? "1") || 1
+
+  if (!query) {
+    return NextResponse.json<SearchResponse>({ results: [], hasMore: false })
+  }
 
   try {
-    const data = await fetchJson<MusicBrainzSearch>(
-      `https://musicbrainz.org/ws/2/release-group?query=${encodeURIComponent(query)}&fmt=json&limit=10`,
-      { headers: { "User-Agent": USER_AGENT } }
-    );
-    const albums = data["release-groups"].filter((item) => item["primary-type"] === "Album");
-    return json({
-      results: albums.slice(0, 10).map((item) => ({
-        id: item.id,
-        type: "album",
-        title: item.title,
-        subtitle: item["artist-credit"]?.map((artist) => artist.name).join(", ") || "Artiste inconnu",
-        year: yearFromDate(item["first-release-date"]),
-        imageUrl: `https://coverartarchive.org/release-group/${item.id}/front-500`,
-        source: "musicbrainz"
-      })),
-      hasMore: data.count > 10
-    } satisfies SearchResponse);
+    const offset = (page - 1) * 10
+    const url = new URL("https://musicbrainz.org/ws/2/release-group")
+    url.searchParams.set("query", query)
+    url.searchParams.set("fmt", "json")
+    url.searchParams.set("limit", "10")
+    url.searchParams.set("offset", String(offset))
+
+    const res = await musicbrainzFetch(url.toString())
+
+    if (res.status === 503) {
+      return NextResponse.json(
+        { error: "Trop de recherches, patientez quelques secondes" },
+        { status: 429 }
+      )
+    }
+    if (!res.ok) return serviceUnavailable()
+
+    const data = (await res.json()) as any
+    const groups: ReleaseGroup[] = data["release-groups"] ?? []
+    const albums = groups.filter((g) => g["primary-type"] === "Album")
+
+    const results: SearchResult[] = albums.map((group) => ({
+      id: group.id,
+      type: "album",
+      title: group.title,
+      subtitle: group["artist-credit"]?.[0]?.name ?? "",
+      year: (group["first-release-date"] ?? "").slice(0, 4),
+      imageUrl: `https://coverartarchive.org/release-group/${group.id}/front-500`,
+      source: "musicbrainz",
+    }))
+
+    const count = Number(data.count ?? results.length)
+    const hasMore = offset + 10 < count
+
+    return NextResponse.json<SearchResponse>({ results, hasMore })
   } catch {
-    return unavailable();
+    return serviceUnavailable()
   }
 }

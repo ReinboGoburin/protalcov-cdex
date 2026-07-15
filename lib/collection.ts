@@ -1,73 +1,102 @@
-﻿"use client";
+import type { CollectionItem, CollectionComment, MediaType } from "./types"
 
-import type { CollectionItem, ItemDetail } from "./types";
+const STORAGE_KEY = "alcove_collection"
 
-export const COLLECTION_KEY = "alcove_collection";
-export const PENDING_ITEM_KEY = "alcove_pending_item";
-export const SELECTED_ITEM_KEY = "alcove_selected_item";
-
-export function readCollection(): CollectionItem[] {
+function readRaw(): CollectionItem[] {
+  if (typeof window === "undefined") return []
   try {
-    const raw = window.localStorage.getItem(COLLECTION_KEY);
-    const items = raw ? (JSON.parse(raw) as CollectionItem[]) : [];
-    return items.sort((a, b) => Date.parse(b.addedAt) - Date.parse(a.addedAt));
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
   } catch {
-    return [];
+    return []
   }
 }
 
-export function writeCollection(items: CollectionItem[]) {
-  window.localStorage.setItem(COLLECTION_KEY, JSON.stringify(items));
+function writeRaw(items: CollectionItem[]) {
+  if (typeof window === "undefined") return
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
 }
 
-export function savePendingItem(item: ItemDetail) {
-  window.sessionStorage.setItem(PENDING_ITEM_KEY, JSON.stringify(item));
+export function getCollection(): CollectionItem[] {
+  return readRaw().sort(
+    (a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime()
+  )
 }
 
-export function readPendingItem(): ItemDetail | null {
-  try {
-    const raw = window.sessionStorage.getItem(PENDING_ITEM_KEY);
-    return raw ? (JSON.parse(raw) as ItemDetail) : null;
-  } catch {
-    return null;
+export function findItem(id: string, type: MediaType): CollectionItem | undefined {
+  return readRaw().find((item) => item.id === id && item.type === type)
+}
+
+export function isInCollection(id: string, type: MediaType): boolean {
+  return findItem(id, type) !== undefined
+}
+
+export function addToCollection(
+  item: Omit<CollectionItem, "addedAt">
+): { ok: true } | { ok: false; reason: "duplicate" } {
+  const items = readRaw()
+  if (items.some((i) => i.id === item.id && i.type === item.type)) {
+    return { ok: false, reason: "duplicate" }
   }
+  items.push({ ...item, addedAt: new Date().toISOString() })
+  writeRaw(items)
+  return { ok: true }
 }
 
-export function saveSelectedItem(item: ItemDetail) {
-  window.sessionStorage.setItem(SELECTED_ITEM_KEY, JSON.stringify(item));
+export function removeFromCollection(id: string, type: MediaType): CollectionItem | null {
+  const items = readRaw()
+  const target = items.find((i) => i.id === id && i.type === type) ?? null
+  writeRaw(items.filter((i) => !(i.id === id && i.type === type)))
+  return target
 }
 
-export function readSelectedItem(): ItemDetail | null {
-  try {
-    const raw = window.sessionStorage.getItem(SELECTED_ITEM_KEY);
-    return raw ? (JSON.parse(raw) as ItemDetail) : null;
-  } catch {
-    return null;
-  }
+export function restoreToCollection(item: CollectionItem) {
+  const items = readRaw()
+  if (items.some((i) => i.id === item.id && i.type === item.type)) return
+  items.push(item)
+  writeRaw(items)
 }
 
-export function upsertItem(detail: ItemDetail, comment: CollectionItem["comment"]) {
-  const current = readCollection();
-  const exists = current.some((item) => item.id === detail.id && item.type === detail.type);
-  if (exists) return { ok: false, reason: "duplicate" as const };
-
-  writeCollection([{ ...detail, comment, addedAt: new Date().toISOString() }, ...current]);
-  return { ok: true as const };
+export function archiveItem(id: string, type: MediaType): CollectionItem | null {
+  const items = readRaw()
+  const idx = items.findIndex((i) => i.id === id && i.type === type)
+  if (idx === -1) return null
+  const previous = items[idx]
+  items[idx] = { ...previous, archivedAt: Date.now() }
+  writeRaw(items)
+  return previous
 }
 
-export function updateComment(id: string, type: string, comment: CollectionItem["comment"]) {
-  const current = readCollection();
-  writeCollection(current.map((item) => (item.id === id && item.type === type ? { ...item, comment } : item)));
+export function unarchiveItem(id: string, type: MediaType): CollectionItem | null {
+  const items = readRaw()
+  const idx = items.findIndex((i) => i.id === id && i.type === type)
+  if (idx === -1) return null
+  const previous = items[idx]
+  items[idx] = { ...previous, archivedAt: undefined, addedAt: new Date().toISOString() }
+  writeRaw(items)
+  return previous
 }
 
-export function removeItem(id: string, type: string) {
-  const current = readCollection();
-  const removed = current.find((item) => item.id === id && item.type === type) || null;
-  writeCollection(current.filter((item) => item.id !== id || item.type !== type));
-  return removed;
+/** Overwrites an item in place by id+type — used to undo an archive/unarchive (the item was mutated, never removed). */
+export function replaceItem(item: CollectionItem) {
+  const items = readRaw()
+  const idx = items.findIndex((i) => i.id === item.id && i.type === item.type)
+  if (idx === -1) return
+  items[idx] = item
+  writeRaw(items)
 }
 
-export function restoreItem(item: CollectionItem) {
-  const current = readCollection();
-  writeCollection([item, ...current.filter((entry) => entry.id !== item.id || entry.type !== item.type)]);
+export function updateComment(
+  id: string,
+  type: MediaType,
+  comment: CollectionComment | null
+) {
+  const items = readRaw()
+  const idx = items.findIndex((i) => i.id === id && i.type === type)
+  if (idx === -1) return
+  items[idx] = { ...items[idx], comment }
+  writeRaw(items)
 }

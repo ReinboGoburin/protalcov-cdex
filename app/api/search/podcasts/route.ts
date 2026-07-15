@@ -1,39 +1,67 @@
-import { json, missingKey, unavailable } from "@/lib/api";
-import { podcastHeaders } from "@/lib/podcastAuth";
-import type { SearchResponse } from "@/lib/types";
+import { NextRequest, NextResponse } from "next/server"
+import { podcastIndexHeaders } from "@/lib/server/podcastIndex"
+import { serviceUnavailable } from "@/lib/server/errors"
+import { getServerEnv } from "@/lib/server/env"
+import type { SearchResponse, SearchResult } from "@/lib/types"
 
-interface PodcastSearch {
-  feeds?: Array<{ id: number; title: string; author?: string; image?: string; artwork?: string }>;
+interface PodcastFeed {
+  id: number
+  title: string
+  author?: string
+  description?: string
+  image?: string
+  artwork?: string
 }
 
-export async function GET(request: Request) {
-  const key = process.env.PODCAST_INDEX_KEY;
-  const secret = process.env.PODCAST_INDEX_SECRET;
-  if (!key) return missingKey("PODCAST_INDEX_KEY");
-  if (!secret) return missingKey("PODCAST_INDEX_SECRET");
-  const { searchParams } = new URL(request.url);
-  const query = searchParams.get("q")?.trim();
-  if (!query) return json({ results: [], hasMore: false } satisfies SearchResponse);
+export async function GET(req: NextRequest) {
+  const query = req.nextUrl.searchParams.get("q")?.trim()
+  const page = Number(req.nextUrl.searchParams.get("page") ?? "1") || 1
+
+  if (!query) {
+    return NextResponse.json<SearchResponse>({ results: [], hasMore: false })
+  }
+
+  const env = getServerEnv()
+  if (!env.PODCAST_INDEX_KEY || !env.PODCAST_INDEX_SECRET) {
+    return serviceUnavailable()
+  }
 
   try {
-    const res = await fetch(`https://api.podcastindex.org/api/1.0/search/byterm?q=${encodeURIComponent(query)}`, {
-      headers: podcastHeaders(key, secret)
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as PodcastSearch;
-    return json({
-      results: (data.feeds || []).slice(0, 10).map((item) => ({
-        id: String(item.id),
+    const url = new URL("https://api.podcastindex.org/api/1.0/search/byterm")
+    url.searchParams.set("q", query)
+    url.searchParams.set("max", "30")
+
+    const res = await fetch(url, { headers: podcastIndexHeaders() })
+    if (!res.ok) return serviceUnavailable()
+
+    const data = (await res.json()) as any
+    const feeds: PodcastFeed[] = data.feeds ?? []
+
+    const start = (page - 1) * 10
+    const slice = feeds.slice(start, start + 10)
+
+    const results: SearchResult[] = slice.map((feed) => {
+      const author = feed.author ?? ""
+      const description = feed.description ?? ""
+      return {
+        id: String(feed.id),
         type: "podcast",
-        title: item.title,
-        subtitle: item.author || "Podcast",
+        title: feed.title ?? "",
+        subtitle: author,
         year: "",
-        imageUrl: item.artwork || item.image || null,
-        source: "podcastindex"
-      })),
-      hasMore: false
-    } satisfies SearchResponse);
+        imageUrl: feed.artwork ?? feed.image ?? null,
+        source: "podcastindex",
+        detailMetadata: {
+          author,
+          description,
+        },
+      }
+    })
+
+    const hasMore = start + 10 < feeds.length
+
+    return NextResponse.json<SearchResponse>({ results, hasMore })
   } catch {
-    return unavailable();
+    return serviceUnavailable()
   }
 }

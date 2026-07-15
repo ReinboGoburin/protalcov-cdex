@@ -1,37 +1,64 @@
-import { decodeHtml, fetchBggXml, json, trimText, unavailable } from "@/lib/api";
-import type { ItemDetail } from "@/lib/types";
+import { NextRequest, NextResponse } from "next/server"
+import { bggFetchXml, BggRetryExhaustedError, toArray } from "@/lib/server/bgg"
+import { serviceUnavailable } from "@/lib/server/errors"
+import { truncateAtWord } from "@/lib/text"
+import type { ItemDetail } from "@/lib/types"
 
-type BggThing = {
-  id: string;
-  image?: string;
-  thumbnail?: string;
-  description?: string;
-  yearpublished?: { value?: string };
-  name?: { type?: string; value?: string } | Array<{ type?: string; value?: string }>;
-};
+interface BggNameNode {
+  "@_type"?: string
+  "@_value"?: string
+}
 
-export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+interface BggThingItem {
+  "@_id": string
+  name?: BggNameNode | BggNameNode[]
+  description?: string
+  image?: string
+  thumbnail?: string
+  yearpublished?: { "@_value"?: string }
+}
+
+function primaryName(item: BggThingItem): string {
+  const names = toArray(item.name)
+  const primary = names.find((n) => n["@_type"] === "primary") ?? names[0]
+  return primary?.["@_value"] ?? ""
+}
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
 
   try {
-    const data = await fetchBggXml(`https://boardgamegeek.com/xmlapi2/thing?id=${encodeURIComponent(id)}&type=boardgame&stats=1`);
-    const item = data.items?.item as BggThing | undefined;
-    if (!item) return json({ error: "Introuvable" }, 404);
-    const names = Array.isArray(item.name) ? item.name : [item.name];
-    const title = decodeHtml(names.find((name) => name?.type === "primary")?.value || names[0]?.value || "Sans titre");
-    return json({
-      id: String(item.id),
+    const url = `https://boardgamegeek.com/xmlapi2/thing?id=${id}&type=boardgame&stats=1`
+    const parsed = (await bggFetchXml(url)) as { items?: { item?: BggThingItem } }
+    const item = parsed.items?.item
+
+    if (!item) {
+      return NextResponse.json({ error: "Item introuvable" }, { status: 404 })
+    }
+
+    const description = truncateAtWord(item.description ?? "", 300)
+
+    const detail: ItemDetail = {
+      id: item["@_id"],
       type: "boardgame",
-      title,
-      subtitle: "Jeu de societe",
-      year: item.yearpublished?.value || "",
-      imageUrl: item.image || item.thumbnail || null,
+      title: primaryName(item),
+      subtitle: "",
+      year: item.yearpublished?.["@_value"] ?? "",
+      imageUrl: item.image ?? item.thumbnail ?? null,
       source: "bgg",
       metadata: {
-        description: trimText(decodeHtml(item.description || ""))
-      }
-    } satisfies ItemDetail);
-  } catch {
-    return unavailable();
+        description,
+      },
+    }
+
+    return NextResponse.json(detail)
+  } catch (err) {
+    if (err instanceof BggRetryExhaustedError) {
+      return NextResponse.json({ error: err.message }, { status: 504 })
+    }
+    return serviceUnavailable()
   }
 }

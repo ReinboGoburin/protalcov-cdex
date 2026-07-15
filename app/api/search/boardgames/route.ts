@@ -1,27 +1,63 @@
-import { decodeHtml, fetchBggXml, json, unavailable } from "@/lib/api";
-import type { SearchResponse } from "@/lib/types";
+import { NextRequest, NextResponse } from "next/server"
+import { bggFetchXml, BggRetryExhaustedError, toArray } from "@/lib/server/bgg"
+import { serviceUnavailable } from "@/lib/server/errors"
+import type { SearchResponse, SearchResult } from "@/lib/types"
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const query = searchParams.get("q")?.trim();
-  if (!query) return json({ results: [], hasMore: false } satisfies SearchResponse);
+interface BggNameNode {
+  "@_type"?: string
+  "@_value"?: string
+}
+
+interface BggSearchItem {
+  "@_id": string
+  name?: BggNameNode | BggNameNode[]
+  yearpublished?: { "@_value"?: string }
+}
+
+function primaryName(item: BggSearchItem): string {
+  const names = toArray(item.name)
+  const primary = names.find((n) => n["@_type"] === "primary") ?? names[0]
+  return primary?.["@_value"] ?? ""
+}
+
+export async function GET(req: NextRequest) {
+  const query = req.nextUrl.searchParams.get("q")?.trim()
+  const page = Number(req.nextUrl.searchParams.get("page") ?? "1") || 1
+
+  if (!query) {
+    return NextResponse.json<SearchResponse>({ results: [], hasMore: false })
+  }
 
   try {
-    const data = await fetchBggXml(`https://boardgamegeek.com/xmlapi2/search?query=${encodeURIComponent(query)}&type=boardgame`);
-    const rawItems = data.items?.item ? (Array.isArray(data.items.item) ? data.items.item : [data.items.item]) : [];
-    return json({
-      results: rawItems.slice(0, 10).map((item: { id: string; name?: { value?: string }; yearpublished?: { value?: string } }) => ({
-        id: String(item.id),
-        type: "boardgame",
-        title: decodeHtml(item.name?.value || "Sans titre"),
-        subtitle: "Jeu de societe",
-        year: item.yearpublished?.value || "",
-        imageUrl: null,
-        source: "bgg"
-      })),
-      hasMore: rawItems.length > 10
-    } satisfies SearchResponse);
-  } catch {
-    return unavailable();
+    const url = new URL("https://boardgamegeek.com/xmlapi2/search")
+    url.searchParams.set("query", query)
+    url.searchParams.set("type", "boardgame")
+
+    const parsed = (await bggFetchXml(url.toString())) as {
+      items?: { item?: BggSearchItem | BggSearchItem[] }
+    }
+
+    const items = toArray(parsed.items?.item)
+    const start = (page - 1) * 10
+    const slice = items.slice(start, start + 10)
+
+    const results: SearchResult[] = slice.map((item) => ({
+      id: item["@_id"],
+      type: "boardgame",
+      title: primaryName(item),
+      subtitle: "",
+      year: item.yearpublished?.["@_value"] ?? "",
+      imageUrl: null,
+      source: "bgg",
+    }))
+
+    const hasMore = start + 10 < items.length
+
+    return NextResponse.json<SearchResponse>({ results, hasMore })
+  } catch (err) {
+    if (err instanceof BggRetryExhaustedError) {
+      return NextResponse.json({ error: err.message }, { status: 504 })
+    }
+    return serviceUnavailable()
   }
 }

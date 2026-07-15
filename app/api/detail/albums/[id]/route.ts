@@ -1,38 +1,65 @@
-import { fetchJson, json, unavailable, USER_AGENT, yearFromDate } from "@/lib/api";
-import type { ItemDetail } from "@/lib/types";
+import { NextRequest, NextResponse } from "next/server"
+import { musicbrainzFetch } from "@/lib/server/musicbrainz"
+import { serviceUnavailable, notFound } from "@/lib/server/errors"
+import type { ItemDetail } from "@/lib/types"
 
-interface MusicBrainzDetail {
-  id: string;
-  title: string;
-  "first-release-date"?: string;
-  genres?: Array<{ name: string; count?: number }>;
-  "artist-credit"?: Array<{ name: string }>;
+interface Genre {
+  name: string
+  count?: number
 }
 
-export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
 
   try {
-    const item = await fetchJson<MusicBrainzDetail>(`https://musicbrainz.org/ws/2/release-group/${id}?inc=genres+artist-credits&fmt=json`, {
-      headers: { "User-Agent": USER_AGENT }
-    });
-    const genres = (item.genres || []).sort((a, b) => (b.count || 0) - (a.count || 0)).slice(0, 3).map((genre) => genre.name);
-    const artist = item["artist-credit"]?.map((person) => person.name).join(", ") || "Artiste inconnu";
-    return json({
-      id: item.id,
+    const groupUrl = `https://musicbrainz.org/ws/2/release-group/${id}?inc=genres+artist-credits&fmt=json`
+    const groupRes = await musicbrainzFetch(groupUrl)
+
+    if (groupRes.status === 404) return notFound()
+    if (!groupRes.ok) return serviceUnavailable()
+
+    const group = (await groupRes.json()) as any
+
+    const genres: Genre[] = group.genres ?? []
+    const topGenres = [...genres]
+      .sort((a, b) => (b.count ?? 0) - (a.count ?? 0))
+      .slice(0, 3)
+      .map((g) => g.name)
+
+    let label = ""
+    try {
+      const releaseUrl = `https://musicbrainz.org/ws/2/release?release-group=${id}&fmt=json&limit=1&inc=labels`
+      const releaseRes = await musicbrainzFetch(releaseUrl)
+      if (releaseRes.ok) {
+        const releaseData = (await releaseRes.json()) as any
+        label = releaseData.releases?.[0]?.["label-info"]?.[0]?.label?.name ?? ""
+      }
+    } catch {
+      // label is optional metadata; ignore failures
+    }
+
+    const artist = group["artist-credit"]?.[0]?.name ?? ""
+
+    const detail: ItemDetail = {
+      id: group.id,
       type: "album",
-      title: item.title,
+      title: group.title ?? "",
       subtitle: artist,
-      year: yearFromDate(item["first-release-date"]),
-      imageUrl: `https://coverartarchive.org/release-group/${item.id}/front-500`,
+      year: (group["first-release-date"] ?? "").slice(0, 4),
+      imageUrl: `https://coverartarchive.org/release-group/${group.id}/front-500`,
       source: "musicbrainz",
       metadata: {
-        artiste: artist,
-        label: "",
-        genres
-      }
-    } satisfies ItemDetail);
+        artist,
+        label,
+        genres: topGenres,
+      },
+    }
+
+    return NextResponse.json(detail)
   } catch {
-    return unavailable();
+    return serviceUnavailable()
   }
 }
