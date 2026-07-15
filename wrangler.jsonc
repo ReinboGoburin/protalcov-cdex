@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "protalcov-ccod",
+  "name": "protalcov-cdex",
   "main": ".open-next/worker.js",
   "workers_dev": true,
   "preview_urls": true,
